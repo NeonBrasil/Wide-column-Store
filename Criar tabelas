@@ -1,0 +1,101 @@
+CREATE TABLE alunos (
+    aluno_id UUID PRIMARY KEY,
+    nome TEXT,
+    data_nascimento DATE,
+    matricula TEXT,
+    curso_id UUID,
+    ano_ingresso INT,
+    semestre_ingresso INT
+);
+
+
+CREATE TABLE professores (
+    professor_id UUID PRIMARY KEY,
+    nome TEXT,
+    departamento_id UUID,
+    chefe_departamento BOOLEAN
+);
+
+
+CREATE TABLE departamentos (
+    departamento_id UUID PRIMARY KEY,
+    nome TEXT,
+    chefe_professor_id UUID
+);
+
+
+
+CREATE TABLE cursos (
+    curso_id UUID PRIMARY KEY,
+    nome TEXT,
+    departamento_id UUID
+);
+
+
+
+CREATE TABLE disciplinas (
+    disciplina_id UUID PRIMARY KEY,
+    nome TEXT,
+    curso_id UUID,
+    departamento_id UUID,
+    semestre_oferta INT
+);
+
+
+
+CREATE TABLE matriz_curricular (
+    curso_id UUID,
+    disciplina_id UUID,
+    obrigatoria BOOLEAN,
+    semestre INT,
+    PRIMARY KEY (curso_id, disciplina_id)
+);
+
+
+
+CREATE TABLE historico_aluno (
+    aluno_id UUID,
+    ano INT,
+    semestre INT,
+    disciplina_id UUID,
+    nome_disciplina TEXT,
+    nota_final FLOAT,
+    situacao TEXT,
+    PRIMARY KEY ((aluno_id), ano, semestre, disciplina_id)
+);
+-- Permite buscar rápido o histórico de um aluno!
+
+CREATE TABLE disciplinas_ministradas (
+    professor_id UUID,
+    ano INT,
+    semestre INT,
+    disciplina_id UUID,
+    nome_disciplina TEXT,
+    PRIMARY KEY ((professor_id), ano, semestre, disciplina_id)
+);
+
+
+CREATE TABLE alunos_formados (
+    ano_formatura INT,
+    semestre_formatura INT,
+    curso_id UUID,
+    aluno_id UUID,
+    nome_aluno TEXT,
+    PRIMARY KEY ((ano_formatura, semestre_formatura, curso_id), aluno_id)
+);
+-- Permite listar os alunos que se formaram num semestre/ano por curso
+
+
+CREATE TABLE grupos_tcc (
+    grupo_id UUID PRIMARY KEY,
+    titulo TEXT,
+    orientador_id UUID,
+    nome_orientador TEXT,
+    curso_id UUID,
+    ano INT,
+    semestre INT,
+    alunos LIST<TEXT>
+);
+-- 'alunos' armazena uma lista de nomes ou ids dos alunos participantes do grupo
+
+
