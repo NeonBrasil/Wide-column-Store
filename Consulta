@@ -1,0 +1,22 @@
+SELECT ano, semestre, disciplina_id, nome_disciplina, nota_final
+FROM historico_aluno
+WHERE aluno_id = ?;
+
+
+SELECT ano, semestre, disciplina_id, nome_disciplina
+FROM disciplinas_ministradas
+WHERE professor_id = ?;
+
+
+SELECT aluno_id, nome_aluno
+FROM alunos_formados
+WHERE ano_formatura = ? AND semestre_formatura = ? AND curso_id = ?;
+
+
+SELECT professor_id, nome, departamento_id 
+FROM professores WHERE chefe_departamento = true;
+
+
+SELECT grupo_id, titulo, alunos, orientador_id, nome_orientador
+FROM grupos_tcc
+WHERE curso_id = ? AND ano = ? AND semestre = ?;
