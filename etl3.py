@@ -1,7 +1,12 @@
 import psycopg2
 from cassandra.cluster import Cluster
-from cassandra.query import SimpleStatement
+from cassandra.query import SimpleStatement, BatchStatement, ConsistencyLevel
 from uuid import uuid4
+import logging
+
+# Configurar logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # CONFIGURAÇÕES DE CONEXÃO
 postgres_config = {
@@ -17,184 +22,193 @@ cassandra_config = {
     'keyspace': 'universidade',
 }
 
-# FUNÇÃO PARA EXTRAIR DADOS DO POSTGRES
 def extract_postgres(query):
-    with psycopg2.connect(**postgres_config) as conn:
-        with conn.cursor() as cur:
-            cur.execute(query)
-            columns = [desc[0] for desc in cur.description]
-            results = []
-            for row in cur.fetchall():
-                results.append(dict(zip(columns, row)))
-            return results
+    """Extrai dados do PostgreSQL com tratamento de erro"""
+    try:
+        with psycopg2.connect(**postgres_config) as conn:
+            with conn.cursor() as cur:
+                cur.execute(query)
+                columns = [desc[0] for desc in cur.description]
+                results = []
+                for row in cur.fetchall():
+                    results.append(dict(zip(columns, row)))
+                logger.info(f"Extraídos {len(results)} registros")
+                return results
+    except Exception as e:
+        logger.error(f"Erro ao extrair dados do PostgreSQL: {e}")
+        raise
 
-# FUNÇÃO PARA INSERIR DADOS NO CASSANDRA
-def insert_cassandra(session, table, columns, values):
-    placeholders = ','.join(['%s'] * len(values))
+def insert_cassandra_batch(session, table, columns, rows_data, batch_size=100):
+    """Insere dados no Cassandra usando batches para melhor performance"""
+    if not rows_data:
+        logger.warning(f"Nenhum dado para inserir na tabela {table}")
+        return
+    
+    placeholders = ','.join(['?' for _ in columns])  # Usar ? ao invés de %s
     cql = f"INSERT INTO {table} ({','.join(columns)}) VALUES ({placeholders})"
-    session.execute(SimpleStatement(cql), values)
+    prepared = session.prepare(cql)
+    
+    total_rows = len(rows_data)
+    processed = 0
+    
+    try:
+        for i in range(0, total_rows, batch_size):
+            batch = BatchStatement(consistency_level=ConsistencyLevel.QUORUM)
+            batch_data = rows_data[i:i + batch_size]
+            
+            for row_data in batch_data:
+                batch.add(prepared, row_data)
+            
+            session.execute(batch)
+            processed += len(batch_data)
+            logger.info(f"Inseridos {processed}/{total_rows} registros em {table}")
+            
+    except Exception as e:
+        logger.error(f"Erro ao inserir dados na tabela {table}: {e}")
+        raise
 
-# MAIN
+def migrate_table(session, table_name, postgres_query, columns, data_transformer=None):
+    """Função genérica para migrar uma tabela"""
+    logger.info(f"Migrando {table_name}...")
+    
+    try:
+        # Extrair dados do PostgreSQL
+        data = extract_postgres(postgres_query)
+        
+        if not data:
+            logger.warning(f"Nenhum dado encontrado para {table_name}")
+            return
+        
+        # Transformar dados se necessário
+        rows_data = []
+        for item in data:
+            if data_transformer:
+                row_values = data_transformer(item)
+            else:
+                row_values = tuple(item[col] for col in columns)
+            rows_data.append(row_values)
+        
+        # Inserir no Cassandra
+        insert_cassandra_batch(session, table_name, columns, rows_data)
+        logger.info(f"Migração de {table_name} concluída com sucesso!")
+        
+    except Exception as e:
+        logger.error(f"Erro na migração de {table_name}: {e}")
+        raise
+
 def main():
-    # 1. Conecta ao Cassandra
-    cluster = Cluster(cassandra_config['hosts'])
-    session = cluster.connect(cassandra_config['keyspace'])
-
-    # Exemplo: Migração de alunos
-    print("Migrando alunos...")
-    alunos = extract_postgres("SELECT * FROM alunos")
-    for aluno in alunos:
-        # Se precisar gerar UUID novo: aluno_id = uuid4()
-        values = (
-            aluno['aluno_id'],
-            aluno['nome'],
-            aluno['data_nascimento'],
-            aluno['matricula'],
-            aluno['curso_id'],
-            aluno['ano_ingresso'],
-            aluno['semestre_ingresso']
-        )
-        insert_cassandra(session, 'alunos',
-            ['aluno_id','nome','data_nascimento','matricula','curso_id','ano_ingresso','semestre_ingresso'], 
-            values
-        )
-
-    print("Migrando professores...")
-    professores = extract_postgres("SELECT * FROM professores")
-    for prof in professores:
-        values = (
-            prof['professor_id'],
-            prof['nome'],
-            prof['departamento_id'],
-            prof['chefe_departamento']
-        )
-        insert_cassandra(session, 'professores',
-            ['professor_id','nome','departamento_id','chefe_departamento'],
-            values
-        )
-
-    print("Migrando departamentos...")
-    departamentos = extract_postgres("SELECT * FROM departamentos")
-    for dep in departamentos:
-        values = (
-            dep['departamento_id'],
-            dep['nome'],
-            dep['chefe_professor_id']
-        )
-        insert_cassandra(session, 'departamentos', 
-            ['departamento_id','nome','chefe_professor_id'],
-            values
-        )
-
-    print("Migrando cursos...")
-    cursos = extract_postgres("SELECT * FROM cursos")
-    for curso in cursos:
-        values = (
-            curso['curso_id'],
-            curso['nome'],
-            curso['departamento_id']
-        )
-        insert_cassandra(session, 'cursos', 
-            ['curso_id','nome','departamento_id'],
-            values
-        )
-
-    print("Migrando disciplinas...")
-    disciplinas = extract_postgres("SELECT * FROM disciplinas")
-    for disc in disciplinas:
-        values = (
-            disc['disciplina_id'],
-            disc['nome'],
-            disc['curso_id'],
-            disc['departamento_id'],
-            disc['semestre_oferta']
-        )
-        insert_cassandra(session, 'disciplinas',
-            ['disciplina_id','nome','curso_id','departamento_id','semestre_oferta'],
-            values
-        )
-
-    print("Migrando matriz_curricular...")
-    matriz = extract_postgres("SELECT * FROM matriz_curricular")
-    for linha in matriz:
-        values = (
-            linha['curso_id'],
-            linha['disciplina_id'],
-            linha['obrigatoria'],
-            linha['semestre']
-        )
-        insert_cassandra(session, 'matriz_curricular',
-            ['curso_id','disciplina_id','obrigatoria','semestre'],
-            values
-        )
-
-    print("Migrando histórico dos alunos...")
-    historico = extract_postgres("SELECT * FROM historico_aluno")
-    for hist in historico:
-        values = (
-            hist['aluno_id'],
-            hist['ano'],
-            hist['semestre'],
-            hist['disciplina_id'],
-            hist['nome_disciplina'],
-            hist['nota_final'],
-            hist['situacao']
-        )
-        insert_cassandra(session, 'historico_aluno',
-            ['aluno_id','ano','semestre','disciplina_id','nome_disciplina','nota_final','situacao'],
-            values
-        )
-
-    print("Migrando disciplinas ministradas...")
-    ministrada = extract_postgres("SELECT * FROM disciplinas_ministradas")
-    for dm in ministrada:
-        values = (
-            dm['professor_id'],
-            dm['ano'],
-            dm['semestre'],
-            dm['disciplina_id'],
-            dm['nome_disciplina'],
-        )
-        insert_cassandra(session, 'disciplinas_ministradas',
-            ['professor_id','ano','semestre','disciplina_id','nome_disciplina'],
-            values
-        )
-
-    print("Migrando alunos formados...")
-    formados = extract_postgres("SELECT * FROM alunos_formados")
-    for f in formados:
-        values = (
-            f['ano_formatura'],
-            f['semestre_formatura'],
-            f['curso_id'],
-            f['aluno_id'],
-            f['nome_aluno']
-        )
-        insert_cassandra(session, 'alunos_formados',
-            ['ano_formatura','semestre_formatura','curso_id','aluno_id','nome_aluno'],
-            values
-        )
-
-    print("Migrando grupos de TCC...")
-    grupos = extract_postgres("SELECT * FROM grupos_tcc")
-    for g in grupos:
-        # Supondo que 'alunos' está como array/lista no Postgres
-        values = (
-            g['grupo_id'],
-            g['titulo'],
-            g['orientador_id'],
-            g['nome_orientador'],
-            g['curso_id'],
-            g['ano'],
-            g['semestre'],
-            g['alunos'],  # Deve ser passado como list/array em Python!
-        )
-        insert_cassandra(session, 'grupos_tcc',
-            ['grupo_id','titulo','orientador_id','nome_orientador','curso_id','ano','semestre','alunos'],
-            values
-        )
-
-    print("Migração concluída.")
+    cluster = None
+    session = None
+    
+    try:
+        # Conectar ao Cassandra
+        cluster = Cluster(cassandra_config['hosts'])
+        session = cluster.connect(cassandra_config['keyspace'])
+        logger.info("Conectado ao Cassandra")
+        
+        # Definir migrações
+        migrations = [
+            {
+                'table': 'alunos',
+                'query': "SELECT * FROM alunos",
+                'columns': ['aluno_id','nome','data_nascimento','matricula','curso_id','ano_ingresso','semestre_ingresso']
+            },
+            {
+                'table': 'professores',
+                'query': "SELECT * FROM professores",
+                'columns': ['professor_id','nome','departamento_id','chefe_departamento']
+            },
+            {
+                'table': 'departamentos',
+                'query': "SELECT * FROM departamentos",
+                'columns': ['departamento_id','nome','chefe_professor_id']
+            },
+            {
+                'table': 'cursos',
+                'query': "SELECT * FROM cursos",
+                'columns': ['curso_id','nome','departamento_id']
+            },
+            {
+                'table': 'disciplinas',
+                'query': "SELECT * FROM disciplinas",
+                'columns': ['disciplina_id','nome','curso_id','departamento_id','semestre_oferta']
+            },
+            {
+                'table': 'matriz_curricular',
+                'query': "SELECT * FROM matriz_curricular",
+                'columns': ['curso_id','disciplina_id','obrigatoria','semestre']
+            },
+            {
+                'table': 'historico_aluno',
+                'query': "SELECT * FROM historico_aluno",
+                'columns': ['aluno_id','ano','semestre','disciplina_id','nome_disciplina','nota_final','situacao']
+            },
+            {
+                'table': 'disciplinas_ministradas',
+                'query': "SELECT * FROM disciplinas_ministradas",
+                'columns': ['professor_id','ano','semestre','disciplina_id','nome_disciplina']
+            },
+            {
+                'table': 'alunos_formados',
+                'query': "SELECT * FROM alunos_formados",
+                'columns': ['ano_formatura','semestre_formatura','curso_id','aluno_id','nome_aluno']
+            }
+        ]
+        
+        # Executar migrações
+        for migration in migrations:
+            migrate_table(
+                session, 
+                migration['table'], 
+                migration['query'], 
+                migration['columns']
+            )
+        
+        # Migração especial para grupos_tcc (devido ao array)
+        logger.info("Migrando grupos_tcc...")
+        grupos = extract_postgres("SELECT * FROM grupos_tcc")
+        
+        if grupos:
+            rows_data = []
+            for g in grupos:
+                # Garantir que 'alunos' seja uma lista
+                alunos_list = g['alunos']
+                if isinstance(alunos_list, str):
+                    # Se vier como string, converter para lista
+                    alunos_list = alunos_list.strip('{}').split(',') if alunos_list else []
+                
+                values = (
+                    g['grupo_id'],
+                    g['titulo'],
+                    g['orientador_id'],
+                    g['nome_orientador'],
+                    g['curso_id'],
+                    g['ano'],
+                    g['semestre'],
+                    alunos_list
+                )
+                rows_data.append(values)
+            
+            insert_cassandra_batch(
+                session, 
+                'grupos_tcc',
+                ['grupo_id','titulo','orientador_id','nome_orientador','curso_id','ano','semestre','alunos'],
+                rows_data
+            )
+        
+        logger.info("Migração concluída com sucesso!")
+        
+    except Exception as e:
+        logger.error(f"Erro durante a migração: {e}")
+        raise
+        
+    finally:
+        # Fechar conexões
+        if session:
+            session.shutdown()
+        if cluster:
+            cluster.shutdown()
+        logger.info("Conexões fechadas")
 
 if __name__ == '__main__':
     main()
